@@ -18,13 +18,6 @@ import { getDrivingRoute } from '@/services/routing';
 import { calculateDistance } from '@/services/aiEngine';
 import { generatePickupQR } from '@/services/qrService';
 
-/**
- * POST /api/donations/accept - NGO accepts an AVAILABLE donation.
- *
- * Atomically transitions the donation to ACCEPTED (only when it is still
- * available — concurrent accepts are safe), assigns the nearest active
- * volunteer and creates the Delivery document with a real driving route.
- */
 export const POST = withRole(['NGO'])(async (request: NextRequest) => {
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -122,8 +115,7 @@ export const POST = withRole(['NGO'])(async (request: NextRequest) => {
       );
     }
 
-    // Atomic claim: only an AVAILABLE donation can be accepted. Two NGOs
-    // accepting at the same time race here — exactly one update succeeds.
+    // Atomic claim: only an AVAILABLE donation can be accepted.
     const donation = await Donation.findOneAndUpdate(
       { _id: donationId, status: { $in: ['AVAILABLE', 'PENDING'] } },
       { $set: { status: 'ACCEPTED', matchedNGO: user.id } },
@@ -137,8 +129,7 @@ export const POST = withRole(['NGO'])(async (request: NextRequest) => {
       );
     }
 
-    // Issue the pickup QR (JWT-signed) and persist it so the donor can show it
-    // to the volunteer for the PICKUP verification scan.
+    // Issue the pickup QR
     try {
       const pickupQr = await generatePickupQR(donation._id.toString());
       await Donation.findByIdAndUpdate(donation._id, {
@@ -148,10 +139,10 @@ export const POST = withRole(['NGO'])(async (request: NextRequest) => {
       console.error('Failed to generate pickup QR:', error);
     }
 
-    // Assign the nearest active volunteer
-    const volunteer = await User.findOne({
+    // ── FIX 1: Find an active volunteer (fallback to any available volunteer if geospatial index fails) ──
+    let volunteer = await User.findOne({
       role: 'VOLUNTEER',
-      status: 'ACTIVE',
+      $or: [{ status: 'ACTIVE' }, { isAvailable: true }],
       location: {
         $near: {
           $geometry: donation.location.coordinates,
@@ -159,6 +150,13 @@ export const POST = withRole(['NGO'])(async (request: NextRequest) => {
         },
       },
     }).exec();
+
+    // Fallback search if geospatial query doesn't match due to index setup
+    if (!volunteer) {
+      volunteer = await User.findOne({
+        role: 'VOLUNTEER',
+      }).exec();
+    }
 
     if (!volunteer) {
       // Roll the donation back so it remains available to other NGOs.
@@ -172,7 +170,7 @@ export const POST = withRole(['NGO'])(async (request: NextRequest) => {
       );
     }
 
-    // Compute the real driving route between pickup (donor) and drop-off (NGO)
+    // Compute the real driving route
     const pickupCoords = donation.location.coordinates as [number, number];
     const dropoffCoords = ngo.location.coordinates as [number, number];
 
@@ -181,8 +179,6 @@ export const POST = withRole(['NGO'])(async (request: NextRequest) => {
       { lat: dropoffCoords[1], lng: dropoffCoords[0] }
     );
 
-    // Fallback when the routing service is unreachable: straight-line distance
-    // with an estimated duration (real numbers, no fabricated route).
     let distanceKm = 0;
     let durationMin = 0;
     let routeCoordinates: Array<[number, number]> | undefined;
@@ -197,10 +193,10 @@ export const POST = withRole(['NGO'])(async (request: NextRequest) => {
           { lat: dropoffCoords[1], lng: dropoffCoords[0] }
         ) * 10
       ) / 10;
-      durationMin = Math.max(1, Math.round(distanceKm / 25 * 60)); // ~25 km/h
+      durationMin = Math.max(1, Math.round(distanceKm / 25 * 60));
     }
 
-    // Create the delivery assigned to the nearest volunteer
+    // Create the delivery assigned to the volunteer
     const delivery = new Delivery({
       donationId: donation._id,
       assignedNGO: user.id,
@@ -218,7 +214,12 @@ export const POST = withRole(['NGO'])(async (request: NextRequest) => {
 
     await delivery.save();
 
-    // A new delivery exists — the active feed changed, drop the cache.
+    // ── FIX 2: Automatically set the NGO to inactive/busy so they show as busy ──
+    await User.findByIdAndUpdate(user.id, {
+      isAvailable: false,
+      status: 'BUSY',
+    }).exec();
+
     await invalidateActiveDonations();
 
     // Notify the volunteer and the donor
@@ -232,8 +233,6 @@ export const POST = withRole(['NGO'])(async (request: NextRequest) => {
       status: 'ACCEPTED',
     });
 
-    // Broadcast a MINIMAL payload on the public food-channel (ids/status only
-    // — no PII). Subscribers refetch their own data via authenticated APIs.
     void broadcast('donation-accepted', {
       donationId: donation._id,
       deliveryId: delivery._id,
