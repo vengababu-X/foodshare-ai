@@ -115,7 +115,7 @@ export default function NGOPortal() {
       if (pollingRef.current) clearInterval(pollingRef.current);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, []);
+  }, [fetchPickups]);
 
   // Guards against overlapping polls (a fetch still in flight is never
   // superseded — the Redis-cached endpoint is fast, but a slow response
@@ -824,18 +824,18 @@ export default function NGOPortal() {
                     Unique QR Code Generated for Volunteer Pickup.
                   </p>
                 </div>
-
-                <div className="mb-6">
-                  <QRCodeDisplay
-                    data={acceptSuccess}
-                    title="Delivery QR Code"
-                    subtitle="Show this to the volunteer for pickup verification"
-                  />
-                </div>
-
+                {selectedDonation && (
+                  <div className="flex flex-col items-center justify-center mb-6">
+                    <QRCodeDisplay
+                      value={acceptSuccess}
+                      title="Delivery Verification QR"
+                      subtitle={selectedDonation.items?.map(i => i.name).join(', ')}
+                    />
+                  </div>
+                )}
                 <button
                   onClick={() => setAcceptSuccess(null)}
-                  className="w-full px-6 py-3 bg-gradient-to-r from-green-500 to-emerald-600 text-white font-semibold rounded-xl shadow-lg hover:shadow-xl transition-all duration-200"
+                  className="w-full px-4 py-3 bg-gradient-to-r from-green-500 to-emerald-600 text-white font-semibold rounded-xl shadow-lg hover:shadow-xl transition-all duration-200"
                 >
                   Done
                 </button>
@@ -845,7 +845,7 @@ export default function NGOPortal() {
         )}
       </AnimatePresence>
 
-      {/* Delivery QR Code Modal */}
+      {/* QR Code Modal for Active Pickups */}
       <AnimatePresence>
         {showDeliveryQR && (
           <motion.div
@@ -862,11 +862,34 @@ export default function NGOPortal() {
               onClick={(e) => e.stopPropagation()}
               className="w-full max-w-md"
             >
-              <QRCodeDisplay
-                data={showDeliveryQR.deliveryQrCode || showDeliveryQR.pickupQrCode || qrCodes[showDeliveryQR._id] || ''}
-                title="Delivery QR Code"
-                subtitle="Show this to the volunteer for delivery verification"
-              />
+              <div className="bg-white rounded-2xl shadow-2xl p-6">
+                <div className="text-center mb-6">
+                  <div className="w-16 h-16 bg-purple-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <QrCode className="w-8 h-8 text-purple-600" />
+                  </div>
+                  <h2 className="text-2xl font-bold text-gray-900 mb-2">
+                    Pickup Verification QR
+                  </h2>
+                  <p className="text-gray-600">
+                    Show this to the assigned volunteer upon arrival
+                  </p>
+                </div>
+
+                <div className="flex flex-col items-center justify-center mb-6">
+                  <QRCodeDisplay
+                    value={showDeliveryQR.deliveryQrCode || qrCodes[showDeliveryQR._id]}
+                    title="Delivery Pass"
+                    subtitle={showDeliveryQR.items?.map(i => i.name).join(', ')}
+                  />
+                </div>
+
+                <button
+                  onClick={() => setShowDeliveryQR(null)}
+                  className="w-full px-4 py-3 bg-gray-100 text-gray-700 font-semibold rounded-xl hover:bg-gray-200 transition-colors"
+                >
+                  Close
+                </button>
+              </div>
             </motion.div>
           </motion.div>
         )}
