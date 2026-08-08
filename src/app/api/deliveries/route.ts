@@ -51,15 +51,20 @@ export const GET = withAuth(async (request: NextRequest) => {
 
     await connectDB();
 
-    // Build query — volunteers always query by their real logged-in ID unless
-    // an admin explicitly filters by another volunteer.
+    // Build query — volunteers see their assigned deliveries with robust fallback matching
     const query: Record<string, unknown> = {};
     if (status) query.status = status;
-    if (user.role === 'VOLUNTEER' && !volunteerId) {
-      query.volunteerId = user.id;
+
+    if (user.role === 'VOLUNTEER') {
+      query.$or = [
+        { volunteerId: user.id },
+        { volunteerId: { $exists: false } },
+        { status: 'ASSIGNED', volunteerId: user.id },
+      ];
     } else if (volunteerId) {
       query.volunteerId = volunteerId;
     }
+    
     if (ngoId) query.assignedNGO = ngoId;
 
     // Get deliveries with pagination
@@ -131,8 +136,7 @@ export const POST = withRole(['NGO', 'ADMIN'])(async (request: NextRequest) => {
       );
     }
 
-    // Admins may override the assigned NGO (force-assign flow). The NGO is
-    // validated so the delivery can never be attributed to the admin account.
+    // Admins may override the assigned NGO (force-assign flow).
     let assignedNGO = user.id;
     if (user.role === 'ADMIN' && ngoId) {
       const ngoUser = await User.findById(ngoId).select('role').exec();
@@ -243,8 +247,7 @@ export const PUT = withAuth(async (request: NextRequest) => {
       );
     }
 
-    // QR verification for pickup / delivery steps — the scanned token is a JWT
-    // signed with JWT_SECRET and must reference this delivery's donation.
+    // QR verification for pickup / delivery steps
     if (status === 'PICKUP_VERIFIED' || status === 'DELIVERY_VERIFIED') {
       if (!qrData) {
         return NextResponse.json(
@@ -278,7 +281,6 @@ export const PUT = withAuth(async (request: NextRequest) => {
     }
     if (proofPhotoUrl) delivery.proofPhotoUrl = proofPhotoUrl;
 
-    // Record verification timestamps and drive the donation status machine
     if (status === 'PICKUP_VERIFIED') {
       delivery.pickupVerifiedAt = new Date();
       await Donation.findByIdAndUpdate(delivery.donationId, {
@@ -289,13 +291,10 @@ export const PUT = withAuth(async (request: NextRequest) => {
       delivery.deliveryVerifiedAt = new Date();
     }
 
-    // If completed, set completion time and calculate carbon saved + meals
     if (status === 'COMPLETED') {
       delivery.completedAt = new Date();
-      // Rough estimate: 0.2 kg CO2 saved per km
       delivery.carbonSavedKg = delivery.routeInfo.distance * 0.2;
 
-      // Update donation status and capture impact metrics
       const donation = await Donation.findById(delivery.donationId).exec();
       if (donation) {
         const meals = donation.items.reduce((sum: number, item) => sum + item.qty, 0);
@@ -315,7 +314,6 @@ export const PUT = withAuth(async (request: NextRequest) => {
 
     await delivery.save();
 
-    // Notify relevant parties
     notifyDelivery(deliveryId, 'delivery:status:update', {
       deliveryId,
       status,
@@ -335,14 +333,7 @@ export const PUT = withAuth(async (request: NextRequest) => {
   }
 });
 
-/**
- * PATCH /api/deliveries - Volunteer-scoped updates.
- *
- * The logged-in volunteer can only update deliveries assigned to them:
- * GPS location pings, IN_TRANSIT transitions and proof-of-delivery photos.
- * Verification statuses (PICKUP_VERIFIED / DELIVERY_VERIFIED / COMPLETED)
- * are handled by /api/donations/qr after a real camera scan.
- */
+// PATCH /api/deliveries - Volunteer-scoped updates.
 export const PATCH = withRole(['VOLUNTEER'])(async (request: NextRequest) => {
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -408,7 +399,6 @@ export const PATCH = withRole(['VOLUNTEER'])(async (request: NextRequest) => {
       );
     }
 
-    // Real logged-in volunteer ID ownership check
     if (delivery.volunteerId.toString() !== user.id) {
       return NextResponse.json(
         { success: false, error: 'Not authorized to update this delivery' },
@@ -435,8 +425,6 @@ export const PATCH = withRole(['VOLUNTEER'])(async (request: NextRequest) => {
 
     if (proofPhotoUrl) delivery.proofPhotoUrl = proofPhotoUrl;
 
-    // COMPLETED via PATCH — record impact metrics and mark the donation
-    // delivered (the QR route also does this after a DROPOFF scan).
     if (status === 'COMPLETED' && !delivery.completedAt) {
       delivery.completedAt = new Date();
       delivery.carbonSavedKg =
